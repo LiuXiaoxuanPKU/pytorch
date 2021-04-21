@@ -1,3 +1,10 @@
+#include <torch/csrc/python_headers.h>
+
+#include <pybind11/pybind11.h>
+#include <torch/csrc/utils/object_ptr.h>
+#include <torch/csrc/autograd/python_variable.h>
+#include <torch/csrc/Exceptions.h>
+
 #include <torch/csrc/autograd/saved_variable.h>
 
 #include <torch/csrc/autograd/edge.h>
@@ -6,6 +13,7 @@
 #include <torch/csrc/autograd/anomaly_mode.h>
 
 #include <ATen/Tensor.h>
+#include <torch/csrc/THP.h>
 
 #include <cstdint>
 #include <list>
@@ -13,6 +21,72 @@
 #include <sstream>
 
 namespace torch { namespace autograd {
+
+void throw_python_error() {
+  python_error err;
+  err.persist();
+  throw err;
+}
+
+PyObject* actnn_quantize(const Variable& variable) {
+    // std::cout << "Quantize " << variable.sizes() << std::endl;
+    // std::cout << "Tensor shape " << variable.dim() << std::endl;
+    // get module
+    pybind11::gil_scoped_acquire gil;
+    auto actnn_module = THPObjectPtr(PyImport_ImportModule("actnn.ops"));
+    if (!actnn_module) throw_python_error();
+
+    // prepare inputs
+    int num_inputs = 2;
+    THPObjectPtr pyInputs(PyTuple_New(num_inputs));
+    PyObject* py_tensor = THPVariable_Wrap(variable);
+    if (!py_tensor) throw_python_error();
+    PyTuple_SET_ITEM(pyInputs.get(), 0, py_tensor);
+    Py_INCREF(Py_None);
+    PyTuple_SET_ITEM(pyInputs.get(), 1, Py_None);
+
+    // quantize
+    THPObjectPtr quantize_fn(PyObject_GetAttrString(actnn_module, "quantize_activation"));
+    if (!quantize_fn) throw_python_error();
+    THPObjectPtr r(PyObject_CallObject(quantize_fn, pyInputs.get()));
+    if (!r)  throw_python_error();
+    ensure_tuple(r);
+
+    // extract outputs
+    int num_outputs = PyTuple_GET_SIZE(r.get());
+    // TORCH_CHECK(num_outputs == 5, "Get %d outputs, expect 5", num_outputs);
+    THPVariable* q_var = (THPVariable*) PyTuple_GET_ITEM(r.get(), 0);
+    return r.release();
+    // int q_bits = PyInt_AsLong(PyTuple_GET_ITEM(r.get(), 1));
+    // THPVariable* q_scale = (THPVariable*) PyTuple_GET_ITEM(r.get(), 0);
+    // THPVariable* q_min = (THPVariable*) PyTuple_GET_ITEM(r.get(), 0);
+}
+
+Variable actnn_dequantize(PyObject* quantized, PyObject* input_shape) {
+    // get module
+    pybind11::gil_scoped_acquire gil;
+    auto actnn_module = THPObjectPtr(PyImport_ImportModule("actnn.ops"));
+    if (!actnn_module) throw_python_error();
+
+    // prepare inputs
+    int num_inputs = 2;
+    THPObjectPtr pyInputs(PyTuple_New(num_inputs));
+    PyTuple_SET_ITEM(pyInputs.get(), 0, quantized);
+    PyTuple_SET_ITEM(pyInputs.get(), 1, input_shape);
+
+    // dequantize
+    THPObjectPtr dequantize_fn(PyObject_GetAttrString(actnn_module, "dequantize_activation"));
+    if (!dequantize_fn) throw_python_error();
+    THPObjectPtr r(PyObject_CallObject(dequantize_fn, pyInputs.get()));
+    if (!r) throw_python_error();
+    ensure_tuple(r);
+
+    // extract outputs
+    int num_outputs = PyTuple_GET_SIZE(r.get());
+    TORCH_CHECK(num_outputs == 1, "Get ",  num_outputs, " outputs, expect 1");
+    THPVariable* q_var = (THPVariable*) PyTuple_GET_ITEM(r.get(), 0);
+    return q_var->cdata;
+}
 
 SavedVariable::SavedVariable(const Variable& variable, bool is_output, bool is_inplace_view) {
   if (variable.defined()) {
@@ -23,7 +97,9 @@ SavedVariable::SavedVariable(const Variable& variable, bool is_output, bool is_i
     is_inplace_view_ = is_inplace_view;
     // These copies are all shared_ptr copies, so slightly more expensive.
     // Do them here instead of in the init list in case data is undefined.
-    data_ = variable.tensor_data();
+    // data_ = variable.tensor_data();
+    quantized_ = actnn_quantize(variable);
+    input_sizes_ = THPSize_NewFromSizes(variable.dim(), variable.sizes().data());
     if (variable.is_leaf()) {
       grad_accumulator_ = impl::grad_accumulator(variable);
     } else if (!is_output) {
@@ -40,13 +116,15 @@ SavedVariable::SavedVariable(const c10::optional<Variable>& variable, bool is_ou
   : SavedVariable(variable.has_value() ? *variable : Variable(), is_output, is_inplace_view) {}
 
 Variable SavedVariable::unpack(std::shared_ptr<Node> saved_for) const {
-  if (!data_.defined()) {
+  if (quantized_ == NULL) {
     if (!was_default_constructed_) {
       throw std::runtime_error(ERR_BACKWARD_TWICE);
     }
     return Variable();
   }
 
+  Variable quantized_data = actnn_dequantize(quantized_, input_sizes_);
+  std::cout << "------continue----" << quantized_data.is_contiguous() << std::endl;
   auto grad_fn = is_inplace_view_ ? weak_grad_fn_.lock() : grad_fn_;
   if (has_grad_fn_ && !grad_fn) {
     if (!saved_for) {
@@ -60,8 +138,10 @@ Variable SavedVariable::unpack(std::shared_ptr<Node> saved_for) const {
   if (saved_version_ != version_counter_.current_version()) {
     std::stringstream message;
     message << "one of the variables needed for gradient computation has been "
-        "modified by an inplace operation: [" << data_.toString() << " "
-        << data_.sizes() << "]";
+        // "modified by an inplace operation: [" << data_.toString() << " "
+        // << data_.sizes() << "]";
+        "modified by an inplace operation: [" << quantized_data.toString() << " "
+        << quantized_data.sizes() << "]";
     if (grad_fn) {
         message << ", which is output " << output_nr_
             << " of " << grad_fn->name() << ",";
@@ -86,9 +166,11 @@ Variable SavedVariable::unpack(std::shared_ptr<Node> saved_for) const {
   // in-place functions on unpacked variables.
   Variable var;
   if (grad_fn) {
-    var = make_variable(data_, Edge(std::move(grad_fn), output_nr_));
+    // var = make_variable(data_, Edge(std::move(grad_fn), output_nr_));
+    var = make_variable(quantized_data.tensor_data(), Edge(std::move(grad_fn), output_nr_));
   } else {
-    var = make_variable(data_, requires_grad_);
+    // var = make_variable(data_, requires_grad_);
+    var = make_variable(quantized_data.tensor_data(), requires_grad_);
   }
   impl::set_version_counter(var, saved_version_);
 
@@ -99,7 +181,6 @@ Variable SavedVariable::unpack(std::shared_ptr<Node> saved_for) const {
   if (requires_grad_ && !var.grad_fn() && grad_accumulator_.expired())
     throw std::logic_error("No grad accumulator for a saved leaf!");
   impl::set_grad_accumulator(var, grad_accumulator_);
-
   return var;
 }
 

@@ -1,5 +1,7 @@
 #pragma once
 
+// #include <torch/csrc/python_headers.h>
+
 #include <torch/csrc/WindowsTorchApiMacro.h>
 
 #include <ATen/ATen.h>
@@ -39,6 +41,9 @@ class TORCH_API SavedVariable {
 
  private:
   at::Tensor data_;
+  bool is_quantized_ = false;
+  PyObject* quantized_ = NULL;
+  PyObject* input_sizes_;
 
   // The gradient function associated with this node. If has_grad_fn
   // is false, then this is a leaf node. Note that the grad_fn is not saved if
