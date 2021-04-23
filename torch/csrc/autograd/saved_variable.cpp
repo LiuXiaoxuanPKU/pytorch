@@ -124,7 +124,6 @@ Variable SavedVariable::unpack(std::shared_ptr<Node> saved_for) const {
   }
 
   Variable quantized_data = actnn_dequantize(quantized_, input_sizes_);
-  std::cout << "------continue----" << quantized_data.is_contiguous() << std::endl;
   auto grad_fn = is_inplace_view_ ? weak_grad_fn_.lock() : grad_fn_;
   if (has_grad_fn_ && !grad_fn) {
     if (!saved_for) {
@@ -167,10 +166,10 @@ Variable SavedVariable::unpack(std::shared_ptr<Node> saved_for) const {
   Variable var;
   if (grad_fn) {
     // var = make_variable(data_, Edge(std::move(grad_fn), output_nr_));
-    var = make_variable(quantized_data.tensor_data(), Edge(std::move(grad_fn), output_nr_));
+    var = make_variable(quantized_data, Edge(std::move(grad_fn), output_nr_));
   } else {
     // var = make_variable(data_, requires_grad_);
-    var = make_variable(quantized_data.tensor_data(), requires_grad_);
+    var = make_variable(quantized_data, requires_grad_);
   }
   impl::set_version_counter(var, saved_version_);
 
