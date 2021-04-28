@@ -98,8 +98,13 @@ SavedVariable::SavedVariable(const Variable& variable, bool is_output, bool is_i
     // These copies are all shared_ptr copies, so slightly more expensive.
     // Do them here instead of in the init list in case data is undefined.
     // data_ = variable.tensor_data();
-    quantized_ = actnn_quantize(variable);
-    input_sizes_ = THPSize_NewFromSizes(variable.dim(), variable.sizes().data());
+    // if (has_grad_fn_) {
+      is_quantized_ = true;
+      quantized_ = actnn_quantize(variable);
+      input_sizes_ = THPSize_NewFromSizes(variable.dim(), variable.sizes().data());
+    // } else {
+    //   data_ = variable.tensor_data();
+    // }
     if (variable.is_leaf()) {
       grad_accumulator_ = impl::grad_accumulator(variable);
     } else if (!is_output) {
@@ -116,14 +121,30 @@ SavedVariable::SavedVariable(const c10::optional<Variable>& variable, bool is_ou
   : SavedVariable(variable.has_value() ? *variable : Variable(), is_output, is_inplace_view) {}
 
 Variable SavedVariable::unpack(std::shared_ptr<Node> saved_for) const {
-  if (quantized_ == NULL) {
+  if (quantized_ == NULL && !data_.defined()) {
     if (!was_default_constructed_) {
       throw std::runtime_error(ERR_BACKWARD_TWICE);
     }
     return Variable();
   }
 
-  Variable quantized_data = actnn_dequantize(quantized_, input_sizes_);
+  // if (!data_.defined()) {
+  //   if (!was_default_constructed_) {
+  //     throw std::runtime_error(ERR_BACKWARD_TWICE);
+  //   }
+  //   return Variable();
+  // }
+
+  Variable quantized_data;
+  if (!is_quantized_) {
+    quantized_data = data_;
+  } else {
+    quantized_data = actnn_dequantize(quantized_, input_sizes_);
+  }
+
+  // if (quantized_data.dim() > 0)
+  //   std::cout <<"----Saved variable shape----" << quantized_data.sizes() << quantized_data.data()[0] << "\n";
+
   auto grad_fn = is_inplace_view_ ? weak_grad_fn_.lock() : grad_fn_;
   if (has_grad_fn_ && !grad_fn) {
     if (!saved_for) {
