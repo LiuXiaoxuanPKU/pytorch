@@ -812,7 +812,8 @@ if(NOT INTERN_BUILD_MOBILE OR NOT BUILD_CAFFE2_MOBILE)
     ${TORCH_ROOT}/aten/src
     ${CMAKE_CURRENT_BINARY_DIR}/../aten/src
     ${CMAKE_CURRENT_BINARY_DIR}/../aten/src/ATen
-    ${CMAKE_BINARY_DIR}/aten/src)
+    ${CMAKE_BINARY_DIR}/aten/src
+    ${PYTHON_INCLUDE_DIR})
 
 if(USE_TBB)
   list(APPEND ATen_CPU_INCLUDE ${TBB_ROOT_DIR}/include)

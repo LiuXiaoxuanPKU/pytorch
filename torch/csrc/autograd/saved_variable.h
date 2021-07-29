@@ -32,6 +32,8 @@ class TORCH_API SavedVariable {
   Variable unpack(std::shared_ptr<Node> saved_for = nullptr) const;
 
   void reset_data() {
+    // reset quantized
+    quantized_ = NULL; 
     return data_.reset();
   }
 

@@ -55,7 +55,7 @@ PyObject* actnn_quantize(const Variable& variable) {
     // extract outputs
     int num_outputs = PyTuple_GET_SIZE(r.get());
     // TORCH_CHECK(num_outputs == 5, "Get %d outputs, expect 5", num_outputs);
-    THPVariable* q_var = (THPVariable*) PyTuple_GET_ITEM(r.get(), 0);
+    // THPVariable* q_var = (THPVariable*) PyTuple_GET_ITEM(r.get(), 0);
     return r.release();
     // int q_bits = PyInt_AsLong(PyTuple_GET_ITEM(r.get(), 1));
     // THPVariable* q_scale = (THPVariable*) PyTuple_GET_ITEM(r.get(), 0);
@@ -98,13 +98,13 @@ SavedVariable::SavedVariable(const Variable& variable, bool is_output, bool is_i
     // These copies are all shared_ptr copies, so slightly more expensive.
     // Do them here instead of in the init list in case data is undefined.
     // data_ = variable.tensor_data();
-    // if (has_grad_fn_) {
+    if (has_grad_fn_) {
       is_quantized_ = true;
       quantized_ = actnn_quantize(variable);
       input_sizes_ = THPSize_NewFromSizes(variable.dim(), variable.sizes().data());
-    // } else {
-    //   data_ = variable.tensor_data();
-    // }
+    } else {
+      data_ = variable.tensor_data();
+    }
     if (variable.is_leaf()) {
       grad_accumulator_ = impl::grad_accumulator(variable);
     } else if (!is_output) {
