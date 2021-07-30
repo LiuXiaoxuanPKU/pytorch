@@ -820,7 +820,7 @@ if(USE_TBB)
   target_link_libraries(torch_cpu PUBLIC tbb)
 endif()
 
-
+  target_link_libraries(torch_cpu PUBLIC ${PYTHON_LIBRARIES})
   target_include_directories(torch_cpu PRIVATE ${ATen_CPU_INCLUDE})
 
   target_include_directories(torch_cpu PRIVATE
