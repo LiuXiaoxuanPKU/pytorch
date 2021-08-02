@@ -107,6 +107,7 @@ core_trainer_sources = [
     "torch/csrc/autograd/functions/utils.cpp",
     "torch/csrc/autograd/input_buffer.cpp",
     "torch/csrc/autograd/record_function_ops.cpp",
+    "torch/csrc/utils/object_ptr.cpp",
     "torch/csrc/autograd/saved_variable.cpp",
     "torch/csrc/autograd/variable.cpp",
     "torch/csrc/jit/frontend/name_mangler.cpp",

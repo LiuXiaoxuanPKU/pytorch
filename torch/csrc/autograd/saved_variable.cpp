@@ -28,9 +28,34 @@ void throw_python_error() {
   throw err;
 }
 
+PyObject *THPVariableClass = nullptr;
+
+static PyObject* THPVariable_NewWithVar_actnn(PyTypeObject* type, Variable var)
+{
+  PyObject* obj = type->tp_alloc(type, 0);
+  if (obj) {
+    auto v = (THPVariable*) obj;
+    new (&v->cdata) Variable(std::move(var));
+    torch::autograd::impl::set_pyobj(v->cdata, obj);
+  }
+  return obj;
+}
+
+PyObject * THPVariable_Wrap_actnn(Variable var)
+{
+  if (!var.defined()) {
+    Py_RETURN_NONE;
+  }
+
+  if (auto obj = torch::autograd::impl::pyobj(var)) {
+    Py_INCREF(obj);
+    return obj;
+  }
+
+  return THPVariable_NewWithVar_actnn((PyTypeObject *)THPVariableClass, std::move(var));
+}
+
 PyObject* actnn_quantize(const Variable& variable) {
-    // std::cout << "Quantize " << variable.sizes() << std::endl;
-    // std::cout << "Tensor shape " << variable.dim() << std::endl;
     // get module
     pybind11::gil_scoped_acquire gil;
     auto actnn_module = THPObjectPtr(PyImport_ImportModule("actnn.ops"));
@@ -39,7 +64,7 @@ PyObject* actnn_quantize(const Variable& variable) {
     // prepare inputs
     int num_inputs = 2;
     THPObjectPtr pyInputs(PyTuple_New(num_inputs));
-    PyObject* py_tensor = THPVariable_Wrap(variable);
+    PyObject* py_tensor = THPVariable_Wrap_actnn(variable);
     if (!py_tensor) throw_python_error();
     PyTuple_SET_ITEM(pyInputs.get(), 0, py_tensor);
     Py_INCREF(Py_None);
@@ -52,14 +77,7 @@ PyObject* actnn_quantize(const Variable& variable) {
     if (!r)  throw_python_error();
     ensure_tuple(r);
 
-    // extract outputs
-    int num_outputs = PyTuple_GET_SIZE(r.get());
-    // TORCH_CHECK(num_outputs == 5, "Get %d outputs, expect 5", num_outputs);
-    // THPVariable* q_var = (THPVariable*) PyTuple_GET_ITEM(r.get(), 0);
     return r.release();
-    // int q_bits = PyInt_AsLong(PyTuple_GET_ITEM(r.get(), 1));
-    // THPVariable* q_scale = (THPVariable*) PyTuple_GET_ITEM(r.get(), 0);
-    // THPVariable* q_min = (THPVariable*) PyTuple_GET_ITEM(r.get(), 0);
 }
 
 Variable actnn_dequantize(PyObject* quantized, PyObject* input_shape) {
@@ -101,7 +119,10 @@ SavedVariable::SavedVariable(const Variable& variable, bool is_output, bool is_i
     if (has_grad_fn_) {
       is_quantized_ = true;
       quantized_ = actnn_quantize(variable);
-      input_sizes_ = THPSize_NewFromSizes(variable.dim(), variable.sizes().data());
+      input_sizes_ = PyTuple_New(variable.dim());
+      for (int i = 0; i <variable.dim(); i++) {
+          PyTuple_SET_ITEM(input_sizes_, i, PyLong_FromLongLong(variable.sizes().data()[i]));
+      }
     } else {
       data_ = variable.tensor_data();
     }
@@ -127,13 +148,6 @@ Variable SavedVariable::unpack(std::shared_ptr<Node> saved_for) const {
     }
     return Variable();
   }
-
-  // if (!data_.defined()) {
-  //   if (!was_default_constructed_) {
-  //     throw std::runtime_error(ERR_BACKWARD_TWICE);
-  //   }
-  //   return Variable();
-  // }
 
   Variable quantized_data;
   if (!is_quantized_) {
