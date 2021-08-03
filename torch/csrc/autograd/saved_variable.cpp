@@ -28,8 +28,6 @@ void throw_python_error() {
   throw err;
 }
 
-PyObject *THPVariableClass = nullptr;
-
 static PyObject* THPVariable_NewWithVar_actnn(PyTypeObject* type, Variable var)
 {
   PyObject* obj = type->tp_alloc(type, 0);
@@ -80,7 +78,7 @@ PyObject* actnn_quantize(const Variable& variable) {
     return r.release();
 }
 
-Variable actnn_dequantize(PyObject* quantized, PyObject* input_shape) {
+Variable actnn_dequantize(PyObject* quantized, const std::vector<int>& input_sizes) {
     // get module
     pybind11::gil_scoped_acquire gil;
     auto actnn_module = THPObjectPtr(PyImport_ImportModule("actnn.ops"));
@@ -90,7 +88,11 @@ Variable actnn_dequantize(PyObject* quantized, PyObject* input_shape) {
     int num_inputs = 2;
     THPObjectPtr pyInputs(PyTuple_New(num_inputs));
     PyTuple_SET_ITEM(pyInputs.get(), 0, quantized);
-    PyTuple_SET_ITEM(pyInputs.get(), 1, input_shape);
+    THPObjectPtr input_sizes_arg(PyTuple_New(input_sizes.size()));
+    for (int i = 0; i <input_sizes.size(); i++) {
+      PyTuple_SET_ITEM(input_sizes_arg.get(), i, PyLong_FromLongLong(input_sizes[i]));
+    }
+    PyTuple_SET_ITEM(pyInputs.get(), 1, input_sizes_arg);
 
     // dequantize
     THPObjectPtr dequantize_fn(PyObject_GetAttrString(actnn_module, "dequantize_activation"));
@@ -119,9 +121,8 @@ SavedVariable::SavedVariable(const Variable& variable, bool is_output, bool is_i
     if (has_grad_fn_) {
       is_quantized_ = true;
       quantized_ = actnn_quantize(variable);
-      input_sizes_ = PyTuple_New(variable.dim());
       for (int i = 0; i <variable.dim(); i++) {
-          PyTuple_SET_ITEM(input_sizes_, i, PyLong_FromLongLong(variable.sizes().data()[i]));
+        input_sizes_.push_back(variable.sizes().data()[i]);
       }
     } else {
       data_ = variable.tensor_data();

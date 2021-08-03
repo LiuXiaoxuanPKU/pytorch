@@ -33,7 +33,8 @@ class TORCH_API SavedVariable {
 
   void reset_data() {
     // reset quantized
-    quantized_ = NULL; 
+    quantized_ = NULL;
+    input_sizes_.clear();
     return data_.reset();
   }
 
@@ -45,7 +46,7 @@ class TORCH_API SavedVariable {
   at::Tensor data_;
   bool is_quantized_ = false;
   PyObject* quantized_ = NULL;
-  PyObject* input_sizes_;
+  std::vector<int> input_sizes_;
 
   // The gradient function associated with this node. If has_grad_fn
   // is false, then this is a leaf node. Note that the grad_fn is not saved if
