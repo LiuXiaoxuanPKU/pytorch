@@ -33,6 +33,7 @@ class TORCH_API SavedVariable {
 
   void reset_data() {
     // reset quantized
+    is_quantized_ = false;
     quantized_ = NULL;
     input_sizes_.clear();
     return data_.reset();

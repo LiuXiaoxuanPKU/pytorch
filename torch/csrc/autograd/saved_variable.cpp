@@ -50,7 +50,10 @@ PyObject * THPVariable_Wrap_actnn(Variable var)
     return obj;
   }
 
-  return THPVariable_NewWithVar_actnn((PyTypeObject *)THPVariableClass, std::move(var));
+  auto tensor_module_actnn = THPObjectPtr(PyImport_ImportModule("torch.tensor"));
+  auto THPVariableClass_actnn = PyObject_GetAttrString(tensor_module_actnn, "Tensor");
+
+  return THPVariable_NewWithVar_actnn((PyTypeObject *)THPVariableClass_actnn, std::move(var));
 }
 
 PyObject* actnn_quantize(const Variable& variable) {
