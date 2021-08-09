@@ -77,7 +77,10 @@ PyObject* actnn_quantize(const Variable& variable) {
     THPObjectPtr r(PyObject_CallObject(quantize_fn, pyInputs.get()));
     if (!r)  throw_python_error();
     ensure_tuple(r);
-
+    bool ref_input = PyObject_IsTrue(PyTuple_GET_ITEM(r.get(), 6));
+    if (ref_input) {
+      Py_INCREF(py_tensor);
+    }
     return r.release();
 }
 
@@ -101,6 +104,11 @@ Variable actnn_dequantize(PyObject* quantized, const std::vector<int>& input_siz
     THPObjectPtr dequantize_fn(PyObject_GetAttrString(actnn_module, "dequantize_activation"));
     if (!dequantize_fn) throw_python_error();
     THPObjectPtr r(PyObject_CallObject(dequantize_fn, pyInputs.get()));
+    // decrease ref
+    bool ref_input = PyObject_IsTrue(PyTuple_GET_ITEM(quantized, 6));
+    if (ref_input) {
+      Py_XDECREF(PyTuple_GET_ITEM(quantized, 0));
+    }
     if (!r) throw_python_error();
     ensure_tuple(r);
 
