@@ -19,6 +19,7 @@
 #include <list>
 #include <memory>
 #include <sstream>
+#include <execinfo.h>
 
 namespace torch { namespace autograd {
 
@@ -56,7 +57,7 @@ PyObject * THPVariable_Wrap_actnn(Variable var)
   return THPVariable_NewWithVar_actnn((PyTypeObject *)THPVariableClass_actnn, std::move(var));
 }
 
-PyObject* actnn_quantize(const Variable& variable) {
+PyObject* actnn_quantize(const Variable& variable, int& tid, bool& is_quantized) {
     // get module
     pybind11::gil_scoped_acquire gil;
     auto actnn_module = THPObjectPtr(PyImport_ImportModule("actnn.ops"));
@@ -77,16 +78,36 @@ PyObject* actnn_quantize(const Variable& variable) {
     THPObjectPtr r(PyObject_CallObject(quantize_fn, pyInputs.get()));
     if (!r)  throw_python_error();
     ensure_tuple(r);
-    bool ref_input = PyObject_IsTrue(PyTuple_GET_ITEM(r.get(), 6));
-    if (ref_input) {
-      Py_INCREF(py_tensor);
+    is_quantized = PyObject_IsTrue(PyTuple_GET_ITEM(r.get(), 5));
+    // std::cout << r.get()->ob_refcnt << " ";
+    // PyObject* ret = r.release();
+    // if (is_quantized) {
+    //   std::cout << ret->ob_refcnt << " ";
+    //   for (int i = 0; i < 6; i++) {
+    //     std::cout << " " << PyTuple_GET_ITEM(ret, i)->ob_refcnt;
+    //   }
+    // }
+    tid = PyLong_AsLong(PyTuple_GET_ITEM(r.get(), 4));
+    PyObject* ret = r.release();
+    if (!is_quantized) {
+      Py_XDECREF(ret);
     }
-    return r.release();
+    return ret;
 }
 
-Variable actnn_dequantize(PyObject* quantized, const std::vector<int>& input_sizes) {
+Variable actnn_dequantize(PyObject* quantized, const std::vector<int>& input_sizes, int tid) {
     // get module
     pybind11::gil_scoped_acquire gil;
+    if (quantized->ob_refcnt == 0) {
+      for (int i = 0; i < input_sizes.size(); i++)
+        std::cout << input_sizes[i] << " ";
+      std::cout << "\n[Error] Ref count is 0" << std::endl; 
+      std::cout << "============================" << std::endl;
+      std::cout << "============================" << std::endl;
+      std::cout << "============================" << std::endl;
+      // assert(false);
+    }
+
     auto actnn_module = THPObjectPtr(PyImport_ImportModule("actnn.ops"));
     if (!actnn_module) throw_python_error();
 
@@ -98,17 +119,18 @@ Variable actnn_dequantize(PyObject* quantized, const std::vector<int>& input_siz
     for (int i = 0; i <input_sizes.size(); i++) {
       PyTuple_SET_ITEM(input_sizes_arg.get(), i, PyLong_FromLongLong(input_sizes[i]));
     }
-    PyTuple_SET_ITEM(pyInputs.get(), 1, input_sizes_arg);
+    
+    // THPObjectPtr input_sizes_arg(PyTuple_New(input_sizes.size()));
+    // for (int i = 0; i <input_sizes.size(); i++) {
+    //   PyTuple_SET_ITEM(input_sizes_arg.get(), i, PyLong_FromLongLong(input_sizes[i]));
+    // }
+    PyTuple_SET_ITEM(pyInputs.get(), 1, input_sizes_arg.get());
+
 
     // dequantize
     THPObjectPtr dequantize_fn(PyObject_GetAttrString(actnn_module, "dequantize_activation"));
     if (!dequantize_fn) throw_python_error();
     THPObjectPtr r(PyObject_CallObject(dequantize_fn, pyInputs.get()));
-    // decrease ref
-    bool ref_input = PyObject_IsTrue(PyTuple_GET_ITEM(quantized, 6));
-    if (ref_input) {
-      Py_XDECREF(PyTuple_GET_ITEM(quantized, 0));
-    }
     if (!r) throw_python_error();
     ensure_tuple(r);
 
@@ -116,6 +138,11 @@ Variable actnn_dequantize(PyObject* quantized, const std::vector<int>& input_siz
     int num_outputs = PyTuple_GET_SIZE(r.get());
     TORCH_CHECK(num_outputs == 1, "Get ",  num_outputs, " outputs, expect 1");
     THPVariable* q_var = (THPVariable*) PyTuple_GET_ITEM(r.get(), 0);
+
+    // Py_XDECREF(quantized);
+    // Py_XDECREF(pyInputs);
+    // std::cout << "*After*input_sizes_arg*" << input_sizes_arg->ob_refcnt << std::endl;
+    // std::cout << "*After*pyInputs*" << pyInputs->ob_refcnt << std::endl;
     return q_var->cdata;
 }
 
@@ -130,13 +157,18 @@ SavedVariable::SavedVariable(const Variable& variable, bool is_output, bool is_i
     // Do them here instead of in the init list in case data is undefined.
     // data_ = variable.tensor_data();
     if (has_grad_fn_) {
-      is_quantized_ = true;
-      quantized_ = actnn_quantize(variable);
+      bool is_quantized = false;
+      int tid =  -2;
+      quantized_ = actnn_quantize(variable, tid, is_quantized);
+      tid_ = tid;
+      is_quantized_ = is_quantized;
+    } 
+    if (!is_quantized_) {
+      data_ = variable.tensor_data();
+    } else if (has_grad_fn_) {
       for (int i = 0; i <variable.dim(); i++) {
         input_sizes_.push_back(variable.sizes().data()[i]);
       }
-    } else {
-      data_ = variable.tensor_data();
     }
     if (variable.is_leaf()) {
       grad_accumulator_ = impl::grad_accumulator(variable);
@@ -153,8 +185,32 @@ SavedVariable::SavedVariable(const Variable& variable, bool is_output, bool is_i
 SavedVariable::SavedVariable(const c10::optional<Variable>& variable, bool is_output, bool is_inplace_view)
   : SavedVariable(variable.has_value() ? *variable : Variable(), is_output, is_inplace_view) {}
 
+void print_back_trace() {
+  const int BT_BUF_SIZE = 10000;
+  int nptrs;
+  void *buffer[BT_BUF_SIZE];
+  char **strings;
+
+  nptrs = backtrace(buffer, BT_BUF_SIZE);
+  printf("backtrace() returned %d addresses\n", nptrs);
+
+  /* The call backtrace_symbols_fd(buffer, nptrs, STDOUT_FILENO)
+              would produce similar output to the following: */
+
+  strings = backtrace_symbols(buffer, nptrs);
+  if (strings == NULL) {
+    perror("backtrace_symbols");
+    exit(EXIT_FAILURE);
+  }
+
+  for (int j = 0; j < nptrs; j++)
+    printf("%s\n", strings[j]);
+
+    free(strings);
+}
+
 Variable SavedVariable::unpack(std::shared_ptr<Node> saved_for) const {
-  if (quantized_ == NULL && !data_.defined()) {
+  if (!is_quantized_ && !data_.defined()) {
     if (!was_default_constructed_) {
       throw std::runtime_error(ERR_BACKWARD_TWICE);
     }
@@ -165,11 +221,9 @@ Variable SavedVariable::unpack(std::shared_ptr<Node> saved_for) const {
   if (!is_quantized_) {
     quantized_data = data_;
   } else {
-    quantized_data = actnn_dequantize(quantized_, input_sizes_);
+    // std::cout << "Before enter dequantize ****** " << data_.getIntrusivePtr().use_count() << " " << data_.defined() << std::endl;
+    quantized_data = actnn_dequantize(quantized_, input_sizes_, tid_);
   }
-
-  // if (quantized_data.dim() > 0)
-  //   std::cout <<"----Saved variable shape----" << quantized_data.sizes() << quantized_data.data()[0] << "\n";
 
   auto grad_fn = is_inplace_view_ ? weak_grad_fn_.lock() : grad_fn_;
   if (has_grad_fn_ && !grad_fn) {
